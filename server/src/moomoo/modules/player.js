@@ -1,7 +1,6 @@
-import { Filter } from "bad-words";
 import { encode } from "msgpack-lite";
+import { detectProfanity } from "../libs/filterchat.js";
 
-var langFilter = new Filter();
 var mathABS = Math.abs;
 var mathCOS = Math.cos;
 var mathSIN = Math.sin;
@@ -51,12 +50,14 @@ export class Player {
                 this.tails[accessories[i].id] = 1;
             }
         }
+
         this.skins = {};
         for (var i = 0; i < hats.length; ++i) {
             if (hats[i].price <= 0) {
                 this.skins[hats[i].id] = 1;
             }
         }
+
         this.points = 0;
         this.dt = 0;
         this.hidden = false;
@@ -74,7 +75,6 @@ export class Player {
         this.needsResourceSync = false;
         this.clientCps = 0;
         this.clientPing = -1;
-
         this._collisionAlready = new Set();
 
         this.spawn = function(moofoll) {
@@ -106,10 +106,10 @@ export class Player {
             this.packetCounter = 0;
             this.packetWindowStart = Date.now();
 
-            const spawn = objectManager.fetchSpawnObj(this.sid);
+            var spawn = objectManager.fetchSpawnObj(this.sid);
 
             if (spawn) {
-                [ this.x, this.y ] = spawn;
+                [this.x, this.y] = spawn;
             } else {
                 this.x = config.mapScale * Math.random();
                 this.y = config.mapScale * Math.random();
@@ -184,33 +184,27 @@ export class Player {
         };
 
         this.setUserData = function(data) {
-            if (data) {
-                this.name = "unknown";
-                var name = data.name + "";
-                if (name === "Guest") {
-                    this.name = "Guest";
-                } else {
-                    name = name.slice(0, config.maxNameLength);
-                    name = name.replace(/[^\w:\(\)\/? -]+/gmi, " ");
-                    name = name.replace(/[^\x00-\x7F]/g, " ");
-                    name = name.trim();
-                    var isProfane = false;
-                    var convertedName = name.toLowerCase().replace(/\s/g, "").replace(/1/g, "i").replace(/0/g, "o").replace(/5/g, "s");
-                    for (var word of langFilter.list) {
-                        if (convertedName.indexOf(word) != -1) {
-                            isProfane = true;
-                            break;
-                        }
-                    }
-                    if (name.length > 0 && !isProfane) {
-                        this.name = name;
-                    }
-                }
+            if (!data) return;
 
-                this.skinColor = 0;
-                if (config.skinColors[data.skin]) {
-                    this.skinColor = data.skin;
+            this.name = "unknown";
+            var name = (data.name + "").slice(0, config.maxNameLength);
+            if (name === "Guest") {
+                this.name = "Guest";
+            } else {
+                name = name.replace(/[^\w:\(\)\/? -]+/gmi, " ");
+                name = name.replace(/[^\x00-\x7F]/g, " ");
+                name = name.trim();
+
+                // use shared detector
+                var det = detectProfanity(name);
+                if (!det.profane && name.length > 0) {
+                    this.name = name;
                 }
+            }
+
+            this.skinColor = 0;
+            if (config.skinColors[data.skin]) {
+                this.skinColor = data.skin;
             }
         };
 
@@ -281,12 +275,12 @@ export class Player {
                         goldTick = 10000 * this.sandboxMillCount;
                     }
                     this.addResource(3, goldTick, true);
-                    this.earnXP(this.pps * 10000)
+                    this.earnXP(this.pps * 10000);
                 }
 
                 var regenAmount = (this.skin && this.skin.healthRegen ? this.skin.healthRegen : 0) + (this.tail && this.tail.healthRegen ? this.tail.healthRegen : 0);
                 if (regenAmount) this.changeHealth(regenAmount, this);
-                if (this.dmgOverTime.dmg) {
+                if (this.dmgOverTime && this.dmgOverTime.dmg) {
                     this.changeHealth(-this.dmgOverTime.dmg, this.dmgOverTime.doer);
                     this.dmgOverTime.time -= 1;
                     if (this.dmgOverTime.time <= 0) this.dmgOverTime.dmg = 0;
@@ -351,7 +345,7 @@ export class Player {
                     for (var x = 0; x < arrs.length; x++) {
                         for (var y = 0; y < arrs[x].length; y++) {
                             var obj = arrs[x][y];
-                            if (!obj.active || already.has(obj.sid)) continue;
+                            if (!obj || !obj.active || already.has(obj.sid)) continue;
                             already.add(obj.sid);
                             objectManager.checkCollision(self, obj, mlt);
                             if (!self.alive) return;
@@ -361,8 +355,10 @@ export class Player {
             })(this);
 
             var tmpIndx = players.indexOf(this);
-            for (var i = tmpIndx + 1; i < players.length; ++i) {
-                if (players[i] != this && players[i].alive) objectManager.checkCollision(this, players[i]);
+            if (tmpIndx >= 0) {
+                for (var i = tmpIndx + 1; i < players.length; ++i) {
+                    if (players[i] != this && players[i].alive) objectManager.checkCollision(this, players[i]);
+                }
             }
 
             var velThreshold = config.physics ? config.physics.velocityStopThreshold : 0.01;
@@ -382,8 +378,9 @@ export class Player {
 
             if (this.buildIndex < 0) {
                 this.gathering = this.mouseState || this.hits > 0;
-                if (this.reloads[this.weaponIndex] > 0) this.reloads[this.weaponIndex] -= delta;
-                else {
+                if (this.reloads[this.weaponIndex] > 0) {
+                    this.reloads[this.weaponIndex] -= delta;
+                } else {
                     if (this.gathering || this.autoGather) {
                         var worked = true;
                         if (items.weapons[this.weaponIndex].gather != undefined) {
@@ -392,15 +389,17 @@ export class Player {
                             if (items.weapons[this.weaponIndex].projectile != undefined && this.hasRes(items.weapons[this.weaponIndex], this.skin ? this.skin.projCost : 0)) {
                                 this.useRes(items.weapons[this.weaponIndex], this.skin ? this.skin.projCost : 0);
                                 this.noMovTimer = 0;
-                                var tmpIndx = items.weapons[this.weaponIndex].projectile;
+                                var tmpIndx2 = items.weapons[this.weaponIndex].projectile;
                                 var projOffset = this.scale * 2;
                                 var aMlt = this.skin && this.skin.aMlt ? this.skin.aMlt : 1;
                                 if (items.weapons[this.weaponIndex].rec) {
                                     this.xVel -= items.weapons[this.weaponIndex].rec * mathCOS(this.dir);
                                     this.yVel -= items.weapons[this.weaponIndex].rec * mathSIN(this.dir);
                                 }
-                                projectileManager.addProjectile(this.x + projOffset * mathCOS(this.dir), this.y + projOffset * mathSIN(this.dir), this.dir, items.projectiles[tmpIndx].range * aMlt, items.projectiles[tmpIndx].speed * aMlt, tmpIndx, this, null, this.zIndex);
-                            } else worked = false;
+                                projectileManager.addProjectile(this.x + projOffset * mathCOS(this.dir), this.y + projOffset * mathSIN(this.dir), this.dir, items.projectiles[tmpIndx2].range * aMlt, items.projectiles[tmpIndx2].speed * aMlt, tmpIndx2, this, null, this.zIndex);
+                            } else {
+                                worked = false;
+                            }
                         }
                         this.gathering = this.mouseState;
                         if (worked) this.reloads[this.weaponIndex] = items.weapons[this.weaponIndex].speed * (this.skin ? this.skin.atkSpd || 1 : 1);
@@ -434,7 +433,7 @@ export class Player {
             var dir = UTILS.getDirection(nearPlayer.x, nearPlayer.y, this.x, this.y);
             projectileManager.addProjectile(this.x, this.y, dir, this.skin.turret.range, 1.6, this.skin.turret.proj, this, 0, 1);
             this.shootCount = 2500;
-        }
+        };
 
         this.addWeaponXP = function(amnt) {
             if (!this.weaponXP[this.weaponIndex]) this.weaponXP[this.weaponIndex] = 0;
@@ -449,11 +448,15 @@ export class Player {
                         this.age++;
                         this.XP = 0;
                         this.maxXP *= (config.experience ? config.experience.levelMultiplier : 1.2);
-                    } else this.XP = this.maxXP;
+                    } else {
+                        this.XP = this.maxXP;
+                    }
                     this.upgradePoints++;
                     this.send("U", this.upgradePoints, this.upgrAge);
                     this.send("T", this.XP, UTILS.fixTo(this.maxXP, 1), this.age);
-                } else this.send("T", this.XP);
+                } else {
+                    this.send("T", this.XP);
+                }
             }
         };
 
@@ -598,7 +601,7 @@ export class Player {
             for (var t = 0; t < tmpList.length; ++t) {
                 for (var i = 0; i < tmpList[t].length; ++i) {
                     tmpObj = tmpList[t][i];
-                    if (tmpObj.active && !tmpObj.dontGather && !hitObjs[tmpObj.sid] && tmpObj.visibleToPlayer(this)) {
+                    if (tmpObj && tmpObj.active && !tmpObj.dontGather && !hitObjs[tmpObj.sid] && tmpObj.visibleToPlayer(this)) {
                         tmpDist = UTILS.getDistance(this.x, this.y, tmpObj.x, tmpObj.y) - tmpObj.scale;
                         if (tmpDist <= items.weapons[this.weaponIndex].range) {
                             tmpDir = UTILS.getDirection(tmpObj.x, tmpObj.y, this.x, this.y);
