@@ -16,7 +16,7 @@ import { encode } from "msgpack-lite";
 
 export class Game {
 
-    // var
+    // state
     players = [];
     ais = [];
     projectiles = [];
@@ -50,9 +50,7 @@ export class Game {
 
         this.object_manager = new ObjectManager(GameObject, this.game_objects, UTILS, config, this.players, this.server);
         this.ai_manager = new AiManager(this.ais, AI, this.players, items, this.object_manager, config, UTILS, (player, score) => {
-            if (player && player.addResource) {
-                player.addResource(3, score); // 3 = points/gold
-            }
+            if (player && player.addResource) player.addResource(3, score); // 3 = points/gold
         }, this.server);
         this.projectile_manager = new ProjectileManager(Projectile, this.projectiles, this.players, this.ais, this.object_manager, items, config, UTILS, this.server);
         this.clan_manager = new ClanManager(this.players, this.server);
@@ -60,75 +58,61 @@ export class Game {
         this.aiSpawnCheckTimer = 0;
 
         const nano = (1000 / config.serverUpdateRate);
-        const timer = new NanoTimer;
+        const timer = new NanoTimer();
 
         let last = performance.now();
         let minimap_cd = config.minimapRate;
+
+        // reuse arrays to reduce allocations
         const minimap_ext = [];
-        let _sent_players = [];
-        let _sent_objects = [];
+        const sentPlayersFlat = [];
+        const sentObjectsFlat = [];
 
         setInterval(() => {
 
             const t = performance.now();
-
             const delta = t - last;
             last = t;
 
+            // leader tracking
             let kills = 0;
             let leader = null;
 
             const upd_map = minimap_cd <= 0;
+            minimap_cd = upd_map ? config.minimapRate : minimap_cd - delta;
 
-            if (upd_map) {
-                minimap_cd = config.minimapRate;
-            } else {
-                minimap_cd -= delta;
-            }
-
+            // prepare minimap entries and call player updates
             minimap_ext.length = 0;
-
-            for (const player of this.players) {
-
-                player.update(delta);
-                player.iconIndex = 0;
-
-                if (!player.alive) continue;
-
-                if (kills < player.kills) {
-                    kills = player.kills;
-                    leader = player;
+            for (let i = 0; i < this.players.length; i++) {
+                const p = this.players[i];
+                p.update(delta);
+                p.iconIndex = 0;
+                if (!p.alive) continue;
+                if (p.kills > kills) {
+                    kills = p.kills;
+                    leader = p;
                 }
-
-                if (upd_map) {
-                    minimap_ext.push({
-                        sid: player.sid,
-                        x: player.x,
-                        y: player.y,
-                        team: player.team || null
-                    });
-                }
-
+                if (upd_map) minimap_ext.push({ sid: p.sid, x: p.x, y: p.y, team: p.team || null });
             }
-
             if (leader) leader.iconIndex = 1;
 
-            for (const projectile of this.projectiles)
-                projectile.update(delta);
+            // projectiles
+            for (let i = 0; i < this.projectiles.length; i++) {
+                this.projectiles[i].update(delta);
+            }
 
             this.updateAnimals(delta);
             this.updateTurrets(delta);
 
+            // leaderboard (keep small)
             {
-                const metric = (player) => player.points;
+                const metric = p => p.points;
                 const maxEntries = Math.min(config.leaderboardMaxPlayers || 10, this.players.length);
                 const top = [];
-
                 for (let i = 0; i < this.players.length; i++) {
                     const p = this.players[i];
                     if (!p.alive) continue;
                     const score = metric(p);
-
                     let j = 0;
                     while (j < top.length && metric(top[j]) >= score) j++;
                     if (j < maxEntries) {
@@ -138,7 +122,6 @@ export class Game {
                         top.push(p);
                     }
                 }
-
                 const payload = [];
                 for (let i = 0; i < top.length; i++) {
                     const p = top[i];
@@ -147,59 +130,66 @@ export class Game {
                 this.server.broadcast("G", payload);
             }
 
-            const activeAis = this.ais.filter(ai => ai.active);
+            // cache active AIs
+            const activeAis = [];
+            for (let i = 0; i < this.ais.length; i++) {
+                const ai = this.ais[i];
+                if (ai.active) activeAis.push(ai);
+            }
 
-            for (const player of this.players) {
+            // Main per-player send loop: build flat payloads and reuse arrays
+            for (let pi = 0; pi < this.players.length; pi++) {
+                const player = this.players[pi];
+                if (!player || !player.active) continue;
 
-                _sent_players.length = 0;
-                _sent_objects.length = 0;
+                // reset flat buffers
+                sentPlayersFlat.length = 0;
+                sentObjectsFlat.length = 0;
 
+                // players visible to `player`
                 for (let i2 = 0; i2 < this.players.length; i2++) {
-                    const player2 = this.players[i2];
+                    const p2 = this.players[i2];
+                    if (!p2.alive || !player.canSee(p2)) continue;
 
-                    if (!player.canSee(player2) || !player2.alive) {
-                        continue;
+                    if (!p2.sentTo[player.id]) {
+                        p2.sentTo[player.id] = true;
+                        player.send("D", p2.getData(), player.id === p2.id);
                     }
-
-                    if (!player2.sentTo[player.id]) {
-                        player2.sentTo[player.id] = true;
-                        player.send("D", player2.getData(), player.id === player2.id);
+                    if (player.id === p2.id && p2.needsResourceSync) {
+                        p2.needsResourceSync = false;
+                        p2.syncResources();
                     }
-                    if (player.id === player2.id && player2.needsResourceSync) {
-                        player2.needsResourceSync = false;
-                        player2.syncResources();
-                    }
-                    _sent_players.push(player2.getInfo());
+                    const info = p2.getInfo();
+                    for (let j = 0; j < info.length; j++) sentPlayersFlat.push(info[j]);
                 }
 
+                // objects visible to `player` (push flattened object payload)
                 for (let oi = 0; oi < this.game_objects.length; oi++) {
-                    const object = this.game_objects[oi];
-
-                    if (!object.sentTo[player.id] && object.active && object.visibleToPlayer(player) && player.canSee(object)) {
-                        _sent_objects.push(object);
-                        object.sentTo[player.id] = true;
-                    }
+                    const obj = this.game_objects[oi];
+                    if (!obj || obj.sentTo[player.id] || !obj.active) continue;
+                    if (!obj.visibleToPlayer(player) || !player.canSee(obj)) continue;
+                    sentObjectsFlat.push(
+                        obj.sid,
+                        UTILS.fixTo(obj.x, 1),
+                        UTILS.fixTo(obj.y, 1),
+                        obj.dir,
+                        obj.scale,
+                        obj.type,
+                        obj.id,
+                        obj.owner ? obj.owner.sid : -1
+                    );
+                    obj.sentTo[player.id] = true;
                 }
 
-                if (_sent_players.length > 0) {
-                    const flat = [];
-                    for (let i = 0; i < _sent_players.length; i++) {
-                        const arr = _sent_players[i];
-                        for (let j = 0; j < arr.length; j++) {
-                            flat.push(arr[j]);
-                        }
-                    }
-                    player.send("a", flat);
-                } else {
-                    player.send("a", null);
-                }
+                // send players / objects
+                player.send("a", sentPlayersFlat.length > 0 ? sentPlayersFlat : null);
 
+                // build & send ai payload
                 const aiPayload = [];
-                for (const ai of activeAis) {
+                for (let aiI = 0; aiI < activeAis.length; aiI++) {
+                    const ai = activeAis[aiI];
                     if (!ai.alive) continue;
-                    if (!player.canSee(ai)) {
-                        continue;
-                    }
+                    if (!player.canSee(ai)) continue;
                     aiPayload.push(
                         ai.sid,
                         ai.index,
@@ -212,26 +202,10 @@ export class Game {
                 }
                 player.send("I", aiPayload.length > 0 ? aiPayload : null);
 
-                if (_sent_objects.length > 0) {
-                    const flatObjects = [];
-                    for (let i = 0; i < _sent_objects.length; i++) {
-                        const object = _sent_objects[i];
-                        flatObjects.push(
-                            object.sid,
-                            UTILS.fixTo(object.x, 1),
-                            UTILS.fixTo(object.y, 1),
-                            object.dir,
-                            object.scale,
-                            object.type,
-                            object.id,
-                            object.owner ? object.owner.sid : -1
-                        );
-                    }
-                    player.send("H", flatObjects);
-                }
+                player.send("H", sentObjectsFlat.length > 0 ? sentObjectsFlat : null);
 
+                // minimap coords
                 if (minimap_ext.length === 0) continue;
-
                 const coords = [];
                 for (let mi = 0; mi < minimap_ext.length; mi++) {
                     const target = minimap_ext[mi];
@@ -239,10 +213,7 @@ export class Game {
                     if (!config.isSandbox && player.team && target.team !== player.team) continue;
                     coords.push(target.x, target.y);
                 }
-                if (coords.length > 0) {
-                    player.send("7", coords);
-                }
-
+                if (coords.length > 0) player.send("7", coords);
             }
 
         }, nano);
@@ -263,12 +234,9 @@ export class Game {
             let treeScales = config.treeScales;
             let bushScales = config.bushScales;
             let rockScales = config.rockScales;
-            let cLoc = function () {
-                return Math.round(Math.random() * config.mapScale);
-            };
-            let rScale = function (scales) {
-                return scales[Math.floor(Math.random() * scales.length)];
-            };
+            let cLoc = function () { return Math.round(Math.random() * config.mapScale); };
+            let rScale = function (scales) { return scales[Math.floor(Math.random() * scales.length)]; };
+
             for (let i = 0; i < treesPerArea * config.areaCount;) {
                 let newObject = [this.game_objects.length, cLoc(), cLoc(), 0, rScale(treeScales), 0, undefined, false, null];
                 if (newObject[2] >= config.mapScale / 2 - config.riverWidth / 2 && newObject[2] <= config.mapScale / 2 + config.riverWidth / 2) continue;
@@ -361,48 +329,31 @@ export class Game {
         const planSource = Array.isArray(config.animalSpawnPlan) && config.animalSpawnPlan.length ? config.animalSpawnPlan : fallbackPlan;
 
         return planSource.map(plan => {
-            if (!Number.isInteger(plan.index)) {
-                return null;
-            }
+            if (!Number.isInteger(plan.index)) return null;
             const desired = typeof plan.desired === "number" ? plan.desired : 0;
-            if (desired <= 0) {
-                return null;
-            }
+            if (desired <= 0) return null;
             const rawPositions = Array.isArray(plan.positions) ? plan.positions : [];
             const resolvedPositions = rawPositions.map(pos => {
-                if (typeof pos.x === "number" && typeof pos.y === "number") {
-                    return {
-                        x: pos.x,
-                        y: pos.y
-                    };
-                }
+                if (typeof pos.x === "number" && typeof pos.y === "number") return { x: pos.x, y: pos.y };
                 if (typeof pos.xRatio === "number" && typeof pos.yRatio === "number") {
                     const xRatio = Math.min(Math.max(pos.xRatio, 0), 1);
                     const yRatio = Math.min(Math.max(pos.yRatio, 0), 1);
-                    return {
-                        x: Math.round(map * xRatio),
-                        y: Math.round(map * yRatio)
-                    };
+                    return { x: Math.round(map * xRatio), y: Math.round(map * yRatio) };
                 }
                 return null;
             }).filter(Boolean);
-            return {
-                index: plan.index,
-                desired: desired,
-                positions: resolvedPositions.length ? resolvedPositions : undefined,
-                nextPosition: 0
-            };
+            return { index: plan.index, desired: desired, positions: resolvedPositions.length ? resolvedPositions : undefined, nextPosition: 0 };
         }).filter(Boolean);
     }
 
     ensureAnimals() {
         if (!this.ai_manager || !this.aiSpawnPlan) return;
-        for (const plan of this.aiSpawnPlan) {
+        for (let pi = 0; pi < this.aiSpawnPlan.length; pi++) {
+            const plan = this.aiSpawnPlan[pi];
             let activeOfType = 0;
-            for (const ai of this.ais) {
-                if (ai.active && ai.index === plan.index) {
-                    activeOfType++;
-                }
+            for (let aiI = 0; aiI < this.ais.length; aiI++) {
+                const ai = this.ais[aiI];
+                if (ai.active && ai.index === plan.index) activeOfType++;
             }
             let safety = 0;
             while (activeOfType < plan.desired && safety < plan.desired * 3) {
@@ -418,18 +369,11 @@ export class Game {
 
     nextAnimalPosition(plan) {
         const type = this.ai_manager.aiTypes[plan.index];
-        if (!type) {
-            return null;
-        }
+        if (!type) return null;
         if (plan.positions && plan.positions.length) {
             const pos = plan.positions[plan.nextPosition % plan.positions.length];
             plan.nextPosition = (plan.nextPosition + 1) % plan.positions.length;
-            if (this.validateAnimalSpawn(plan.index, pos.x, pos.y)) {
-                return {
-                    x: pos.x,
-                    y: pos.y
-                };
-            }
+            if (this.validateAnimalSpawn(plan.index, pos.x, pos.y)) return { x: pos.x, y: pos.y };
         }
         return this.randomAnimalPosition(plan.index);
     }
@@ -438,17 +382,12 @@ export class Game {
         const type = this.ai_manager.aiTypes[index];
         if (!type) return false;
         const scale = type.scale;
-        if (x < scale || y < scale || x > config.mapScale - scale || y > config.mapScale - scale) {
-            return false;
-        }
-        if (!this.object_manager.checkItemLocation(x, y, scale, 0.6, null, false, null)) {
-            return false;
-        }
-        for (const ai of this.ais) {
+        if (x < scale || y < scale || x > config.mapScale - scale || y > config.mapScale - scale) return false;
+        if (!this.object_manager.checkItemLocation(x, y, scale, 0.6, null, false, null)) return false;
+        for (let i = 0; i < this.ais.length; i++) {
+            const ai = this.ais[i];
             if (!ai.active) continue;
-            if (UTILS.getDistance(x, y, ai.x, ai.y) < ai.scale + scale) {
-                return false;
-            }
+            if (UTILS.getDistance(x, y, ai.x, ai.y) < ai.scale + scale) return false;
         }
         return true;
     }
@@ -459,24 +398,15 @@ export class Game {
         for (let attempt = 0; attempt < 40; attempt++) {
             const x = UTILS.randInt(type.scale, config.mapScale - type.scale);
             const y = UTILS.randInt(type.scale, config.mapScale - type.scale);
-            if (this.validateAnimalSpawn(index, x, y)) {
-                return {
-                    x,
-                    y
-                };
-            }
+            if (this.validateAnimalSpawn(index, x, y)) return { x, y };
         }
-        return {
-            x: UTILS.randInt(type.scale, config.mapScale - type.scale),
-            y: UTILS.randInt(type.scale, config.mapScale - type.scale)
-        };
+        return { x: UTILS.randInt(type.scale, config.mapScale - type.scale), y: UTILS.randInt(type.scale, config.mapScale - type.scale) };
     }
 
     updateAnimals(delta) {
-        for (const ai of this.ais) {
-            if (ai.active) {
-                ai.update(delta);
-            }
+        for (let i = 0; i < this.ais.length; i++) {
+            const ai = this.ais[i];
+            if (ai.active) ai.update(delta);
         }
         this.aiSpawnCheckTimer -= delta;
         if (this.aiSpawnCheckTimer <= 0) {
@@ -486,35 +416,20 @@ export class Game {
     }
 
     updateTurrets(delta) {
-        if (!this.object_manager || !this.projectile_manager) {
-            return;
-        }
+        if (!this.object_manager || !this.projectile_manager) return;
         const structures = this.object_manager.updateObjects;
-        if (!structures || structures.length === 0) {
-            return;
-        }
+        if (!structures || structures.length === 0) return;
         for (let i = 0; i < structures.length; i++) {
             const structure = structures[i];
-            if (!structure || !structure.active) {
-                continue;
-            }
+            if (!structure || !structure.active) continue;
 
-            if (typeof structure.update === "function") {
-                structure.update(delta);
-            }
+            if (typeof structure.update === "function") structure.update(delta);
 
-            if (structure.projectile == null || !structure.shootRate || !structure.shootRange) {
-                continue;
-            }
-
-            if (typeof structure.shootCount !== "number") {
-                structure.shootCount = structure.shootRate;
-            }
+            if (structure.projectile == null || !structure.shootRate || !structure.shootRange) continue;
+            if (typeof structure.shootCount !== "number") structure.shootCount = structure.shootRate;
 
             structure.shootCount -= delta;
-            if (structure.shootCount > 0) {
-                continue;
-            }
+            if (structure.shootCount > 0) continue;
 
             const target = this.pickTurretTarget(structure);
             if (!target) {
@@ -549,7 +464,6 @@ export class Game {
             );
 
             structure.shootCount = structure.shootRate;
-
             this.broadcastTurretShot(structure, direction);
         }
     }
@@ -562,16 +476,15 @@ export class Game {
 
         const consider = (candidate) => {
             const distance = UTILS.getDistance(structure.x, structure.y, candidate.x, candidate.y);
-            if (distance > structure.shootRange + (candidate.scale || 0)) {
-                return;
-            }
+            if (distance > structure.shootRange + (candidate.scale || 0)) return;
             if (!bestTarget || distance < bestDist) {
                 bestTarget = candidate;
                 bestDist = distance;
             }
         };
 
-        for (const player of this.players) {
+        for (let i = 0; i < this.players.length; i++) {
+            const player = this.players[i];
             if (!player.active || !player.alive) continue;
             if (player === owner) continue;
             if (player.skinIndex === 22) continue;
@@ -580,7 +493,8 @@ export class Game {
             consider(player);
         }
 
-        for (const ai of this.ais) {
+        for (let i = 0; i < this.ais.length; i++) {
+            const ai = this.ais[i];
             if (!ai.active || !ai.alive) continue;
             consider(ai);
         }
@@ -590,7 +504,8 @@ export class Game {
 
     broadcastTurretShot(structure, direction) {
         const fixedDir = UTILS.fixTo(direction, 2);
-        for (const player of this.players) {
+        for (let i = 0; i < this.players.length; i++) {
+            const player = this.players[i];
             if (!player.active) continue;
             if (!structure.sentTo[player.id]) continue;
             if (!player.canSee(structure)) continue;
@@ -616,17 +531,13 @@ export class Game {
             accessories,
             socket,
             (player, score) => {
-                if (player && player.addResource) {
-                    player.addResource(3, score); // 3 = points/gold
-                }
+                if (player && player.addResource) player.addResource(3, score); // 3 = points/gold
             },
             () => {}
         );
 
         player.send("io-init", player.id);
-        player.send("A", {
-            teams: this.clan_manager.ext()
-        });
+        player.send("A", { teams: this.clan_manager.ext() });
 
         this.id_storage[sid] = false;
         this.players.push(player);
