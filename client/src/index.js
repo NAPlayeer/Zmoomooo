@@ -1592,73 +1592,151 @@ function selectSkinColor(index) {
     updateSkinColorPicker();
 }
 
+// client chat block replacement
 var chatBox = document.getElementById("chatBox");
 var chatHolder = document.getElementById("chatHolder");
 var chatFilter = new Filter();
+var customChatWords = ["nigger","nigga","nga","ngger","nggr","ngr","hoe","slut","pussy","dick","faggot"];
+
+var chatProfanityWords = (function(){
+    var list = [];
+    for (var i = 0; i < chatFilter.list.length; i++) {
+        var w = String(chatFilter.list[i] || "").toLowerCase();
+        if (w) list.push(w);
+    }
+    for (var j = 0; j < customChatWords.length; j++) {
+        var w = String(customChatWords[j] || "").toLowerCase();
+        if (w) list.push(w);
+    }
+    return list;
+})();
+
+var chatDigitMap = { "0":"o","1":"i","2":"z","3":"e","4":"a","5":"s","6":"g","7":"t","8":"b","9":"g" };
+var chatSymMap = { "@":"a","$":"s","!":"i","|":"i","+":"t","(":"c",")":"c","_":"", "-":"" };
+
+var chatMuteUntil = 0;
+var chatMuteMessage = "";
+
+function normalizeChatToken(value) {
+    var s = String(value || "").toLowerCase();
+    var out = "";
+    for (var i = 0; i < s.length; i++) {
+        var ch = s.charAt(i);
+        if (ch >= "a" && ch <= "z") { out += ch; continue; }
+        if (ch >= "0" && ch <= "9") { out += (chatDigitMap[ch] || ""); continue; }
+        if (chatSymMap[ch]) { out += chatSymMap[ch]; continue; }
+    }
+    return out;
+}
+
+function chatIsMuted() {
+    return Date.now() < (Number(chatMuteUntil) || 0);
+}
+
+function formatMuteText(ms) {
+    if (!ms || ms <= 0) return "0s";
+    var secs = Math.floor(ms/1000);
+    var years = Math.floor(secs / (3600*24*365)); secs -= years * 3600*24*365;
+    var weeks = Math.floor(secs / (3600*24*7)); secs -= weeks * 3600*24*7;
+    var days = Math.floor(secs / (3600*24)); secs -= days * 3600*24;
+    var hours = Math.floor(secs / 3600); secs -= hours * 3600;
+    var minutes = Math.floor(secs / 60); secs -= minutes * 60;
+    var parts = [];
+    if (years) parts.push(years + "y");
+    if (weeks) parts.push(weeks + "w");
+    if (days) parts.push(days + "d");
+    if (hours) parts.push(hours + "h");
+    if (minutes) parts.push(minutes + "m");
+    if (secs && parts.length === 0) parts.push(secs + "s");
+    if (parts.length === 0) return "0s";
+    return parts.join(" ");
+}
+
+function setChatMuteState(untilMs, message) {
+    chatMuteUntil = Number(untilMs) || 0;
+    chatMuteMessage = String(message || "");
+    updateChatMuteUI();
+}
+
+function updateChatMuteUI() {
+    if (!chatBox) return;
+    var muted = chatIsMuted();
+    chatBox.disabled = muted;
+    chatBox.readOnly = muted;
+    chatBox.style.opacity = muted ? "0.5" : "1";
+    chatBox.style.filter = muted ? "grayscale(0.75)" : "none";
+    chatBox.style.cursor = muted ? "not-allowed" : "text";
+    if (muted) {
+        var rem = Math.max(0, chatMuteUntil - Date.now());
+        chatBox.placeholder = "You're muted for " + formatMuteText(rem) + ".";
+        chatBox.value = "";
+        chatBox.title = (chatMuteMessage || "You are muted") + " (" + formatMuteText(rem) + ")";
+    } else {
+        chatBox.placeholder = "Type here...";
+        chatBox.title = "";
+    }
+}
 
 function toggleChat() {
+    if (chatIsMuted()) {
+        updateChatMuteUI();
+        if (chatHolder) chatHolder.style.display = "block";
+        return;
+    }
     if (!usingTouch) {
         if (chatHolder.style.display == "block") {
-            if (chatBox.value) {
-                sendChat(chatBox.value);
-            }
+            if (chatBox && chatBox.value) sendChat(chatBox.value);
             closeChat();
         } else {
             storeMenu.style.display = "none";
             allianceMenu.style.display = "none";
             chatHolder.style.display = "block";
-            chatBox.focus();
+            if (chatBox) chatBox.focus();
             resetMoveDir();
-            // И нужно ещё убрать это для чата
         }
     } else {
-        setTimeout(function () { // Timeout lets the `hookTouchEvents` function exit
-            var chatMessage = prompt("chat message");
-            if (chatMessage) {
-                sendChat(chatMessage);
-            }
-        }, 1);
+        setTimeout(function(){ var m = prompt("chat message"); if (m) sendChat(m); }, 1);
     }
-    chatBox.value = "";
+    if (chatBox) chatBox.value = "";
 }
 
 function sendChat(message) {
-    io.send("6", message.slice(0, 30));
+    if (chatIsMuted()) return;
+    var val = String(message || "").trim();
+    if (!val) return;
+    io.send("6", val.slice(0, 30));
 }
 
 function closeChat() {
-    chatBox.value = "";
-    chatHolder.style.display = "none";
+    if (chatBox) chatBox.value = "";
+    if (chatHolder) chatHolder.style.display = "none";
+}
+
+function buildProfanityMask(len) {
+    if (!len) return "";
+    var m = "M";
+    for (var i = 1; i < len; i++) m += "o";
+    return m;
 }
 
 function checkProfanityString(text) {
-    var result = text;
-    for (var i = 0; i < chatFilter.list.length; ++i) {
-        var term = chatFilter.list[i];
-        if (!term) {
-            continue;
+    if (!text || typeof text !== "string") return "";
+    var parts = text.split(/(\s+)/); // preserve spaces
+    for (var i = 0; i < parts.length; i++) {
+        if (parts[i].trim().length === 0) continue;
+        var raw = parts[i];
+        var norm = normalizeChatToken(raw);
+        if (!norm) continue;
+        for (var j = 0; j < chatProfanityWords.length; j++) {
+            var bad = normalizeChatToken(chatProfanityWords[j]);
+            if (!bad) continue;
+            if (norm.indexOf(bad) !== -1) {
+                parts[i] = buildProfanityMask(raw.length);
+                break;
+            }
         }
-        var mask = buildProfanityMask(term.length);
-        var escapedTerm = escapeRegExp(term);
-        var re = new RegExp(escapedTerm, "gi");
-        result = result.replace(re, mask);
     }
-    return result;
-}
-
-function buildProfanityMask(length) {
-    if (!length) {
-        return "";
-    }
-    var mask = "M";
-    for (var i = 1; i < length; i++) {
-        mask += "o";
-    }
-    return mask;
-}
-
-function escapeRegExp(value) {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return parts.join("");
 }
 
 function receiveChat(sid, message) {
