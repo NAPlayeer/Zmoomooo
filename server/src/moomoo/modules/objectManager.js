@@ -4,6 +4,7 @@ var mathCOS = Math.cos;
 var mathSIN = Math.sin;
 var mathPOW = Math.pow;
 var mathSQRT = Math.sqrt;
+
 export class ObjectManager {
     constructor(GameObject, gameObjects, UTILS, config, players, server) {
         this.objects = gameObjects;
@@ -11,55 +12,57 @@ export class ObjectManager {
         this.updateObjects = [];
         var cactusDamage = typeof config.cactusDamage === "number" ? config.cactusDamage : 20;
         var desertStart = typeof config.mapScale === "number" && typeof config.snowBiomeTop === "number" ? config.mapScale - config.snowBiomeTop : null;
-
-        // SET OBJECT GRIDS:
+	// set objects grid
         var tmpX;
         var tmpY;
         var tmpS = config.mapScale / config.colGrid;
+
         this.setObjectGrids = function(obj) {
+            if (!obj || !obj.x || !obj.y || !obj.scale) return;
             var objX = Math.min(config.mapScale, Math.max(0, obj.x));
             var objY = Math.min(config.mapScale, Math.max(0, obj.y));
+            obj.gridLocations = obj.gridLocations || [];
+
             for (var x = 0; x < config.colGrid; ++x) {
                 tmpX = x * tmpS;
                 for (var y = 0; y < config.colGrid; ++y) {
                     tmpY = y * tmpS;
                     if (objX + obj.scale >= tmpX && objX - obj.scale <= tmpX + tmpS && objY + obj.scale >= tmpY && objY - obj.scale <= tmpY + tmpS) {
-                        if (!this.grids[x + "_" + y]) {
-                            this.grids[x + "_" + y] = [];
-                        }
-                        this.grids[x + "_" + y].push(obj);
-                        obj.gridLocations.push(x + "_" + y);
+                        var key = x + "_" + y;
+                        if (!this.grids[key]) this.grids[key] = [];
+                        if (this.grids[key].indexOf(obj) === -1) this.grids[key].push(obj);
+                        if (obj.gridLocations.indexOf(key) === -1) obj.gridLocations.push(key);
                     }
                 }
             }
         };
-
-        // REMOVE OBJECT FROM GRID:
+	// Remove objects from the grid
         this.removeObjGrid = function(obj) {
-            var tmpIndx;
+            if (!obj || !Array.isArray(obj.gridLocations)) return;
             for (var i = 0; i < obj.gridLocations.length; ++i) {
-                tmpIndx = this.grids[obj.gridLocations[i]].indexOf(obj);
-                if (tmpIndx >= 0) {
-                    this.grids[obj.gridLocations[i]].splice(tmpIndx, 1);
-                }
+                var key = obj.gridLocations[i];
+                if (!this.grids[key]) continue;
+                var idx = this.grids[key].indexOf(obj);
+                if (idx >= 0) this.grids[key].splice(idx, 1);
+                if (this.grids[key].length === 0) delete this.grids[key];
             }
+            obj.gridLocations.length = 0;
         };
-
-        // DISABLE OBJ:
+	// disable objects
         this.disableObj = function(obj) {
+            if (!obj) return;
             obj.active = false;
 
             if (obj.owner && obj.pps) {
                 obj.owner.pps -= obj.pps;
             }
+		// removes object from grid
             this.removeObjGrid(obj);
-            var tmpIndx = this.updateObjects.indexOf(obj);
-            if (tmpIndx >= 0) {
-                this.updateObjects.splice(tmpIndx, 1);
-            }
-        };
 
-        // HIT OBJECT:
+            var tmpIndx = this.updateObjects.indexOf(obj);
+            if (tmpIndx >= 0) this.updateObjects.splice(tmpIndx, 1);
+        };
+	// hit objects
         this.hitObj = function(tmpObj, tmpDir) {
             for (var p = 0; p < players.length; ++p) {
                 if (players[p].active) {
@@ -78,82 +81,69 @@ export class ObjectManager {
                 }
             }
         };
-
-        // GET GRID ARRAY:
+	// get grid array
         var tmpArray = [];
         var tmpGrid;
+
         this.getGridArrays = function(xPos, yPos, s) {
             tmpX = mathFloor(xPos / tmpS);
             tmpY = mathFloor(yPos / tmpS);
             tmpArray.length = 0;
+
             try {
-                if (this.grids[tmpX + "_" + tmpY]) {
-                    tmpArray.push(this.grids[tmpX + "_" + tmpY]);
-                }
+                if (this.grids[tmpX + "_" + tmpY]) tmpArray.push(this.grids[tmpX + "_" + tmpY]);
+
                 if (xPos + s >= (tmpX + 1) * tmpS) {
-                    // RIGHT
+			// right
                     tmpGrid = this.grids[tmpX + 1 + "_" + tmpY];
-                    if (tmpGrid) {
-                        tmpArray.push(tmpGrid);
-                    }
+                    if (tmpGrid && tmpArray.indexOf(tmpGrid) === -1) tmpArray.push(tmpGrid);
                     if (tmpY && yPos - s <= tmpY * tmpS) {
-                        // TOP RIGHT
+			// top right
                         tmpGrid = this.grids[tmpX + 1 + "_" + (tmpY - 1)];
-                        if (tmpGrid) {
-                            tmpArray.push(tmpGrid);
-                        }
+                        if (tmpGrid && tmpArray.indexOf(tmpGrid) === -1) tmpArray.push(tmpGrid);
                     } else {
                         if (yPos + s >= (tmpY + 1) * tmpS) {
-                            // BOTTOM RIGHT
+				// bottom right
                             tmpGrid = this.grids[tmpX + 1 + "_" + (tmpY + 1)];
-                            if (tmpGrid) {
-                                tmpArray.push(tmpGrid);
-                            }
+                            if (tmpGrid && tmpArray.indexOf(tmpGrid) === -1) tmpArray.push(tmpGrid);
                         }
                     }
                 }
+
                 if (tmpX && xPos - s <= tmpX * tmpS) {
-                    // LEFT
+			// left
                     tmpGrid = this.grids[tmpX - 1 + "_" + tmpY];
-                    if (tmpGrid) {
-                        tmpArray.push(tmpGrid);
-                    }
+                    if (tmpGrid && tmpArray.indexOf(tmpGrid) === -1) tmpArray.push(tmpGrid);
                     if (tmpY && yPos - s <= tmpY * tmpS) {
-                        // TOP LEFT
+			// top left
                         tmpGrid = this.grids[tmpX - 1 + "_" + (tmpY - 1)];
-                        if (tmpGrid) {
-                            tmpArray.push(tmpGrid);
-                        }
-                    } else {
-                        if (yPos + s >= (tmpY + 1) * tmpS) {
-                            // BOTTOM LEFT
+                        if (tmpGrid && tmpArray.indexOf(tmpGrid) === -1) tmpArray.push(tmpGrid);
+                    } else { 	
+                        if (yPos + s >= (tmpY + 1) * tmpS) { 
+				// bottom left
                             tmpGrid = this.grids[tmpX - 1 + "_" + (tmpY + 1)];
-                            if (tmpGrid) {
-                                tmpArray.push(tmpGrid);
-                            }
+                            if (tmpGrid && tmpArray.indexOf(tmpGrid) === -1) tmpArray.push(tmpGrid);
                         }
                     }
                 }
+		// bottom
                 if (yPos + s >= (tmpY + 1) * tmpS) {
-                    // BOTTOM
                     tmpGrid = this.grids[tmpX + "_" + (tmpY + 1)];
-                    if (tmpGrid) {
-                        tmpArray.push(tmpGrid);
-                    }
+                    if (tmpGrid && tmpArray.indexOf(tmpGrid) === -1) tmpArray.push(tmpGrid);
                 }
+		// top
                 if (tmpY && yPos - s <= tmpY * tmpS) {
-                    // TOP
                     tmpGrid = this.grids[tmpX + "_" + (tmpY - 1)];
-                    if (tmpGrid) {
-                        tmpArray.push(tmpGrid);
-                    }
+                    if (tmpGrid && tmpArray.indexOf(tmpGrid) === -1) tmpArray.push(tmpGrid);
                 }
-            } catch (e) {}
+            } catch (e) {
+            }
+
             return tmpArray;
         };
 
-        // ADD NEW:
         var tmpObj;
+
         this.add = function(sid, x, y, dir, s, type, data, setSID, owner) {
             if (!data && type === 1 && desertStart !== null && y >= desertStart) {
                 data = {
@@ -161,13 +151,16 @@ export class ObjectManager {
                     dmg: cactusDamage
                 };
             }
+
             tmpObj = null;
+
             for (var i = 0; i < gameObjects.length; ++i) {
                 if (gameObjects[i].sid == sid) {
                     tmpObj = gameObjects[i];
                     break;
                 }
             }
+
             if (!tmpObj) {
                 for (var i = 0; i < gameObjects.length; ++i) {
                     if (!gameObjects[i].active) {
@@ -176,23 +169,24 @@ export class ObjectManager {
                     }
                 }
             }
+
             if (!tmpObj) {
                 tmpObj = new GameObject(sid);
                 gameObjects.push(tmpObj);
             }
-            if (setSID) {
-                tmpObj.sid = sid;
-            }
+
+            if (setSID) tmpObj.sid = sid;
+
             tmpObj.init(x, y, dir, s, type, data, owner);
+
             if (server) {
                 this.setObjectGrids(tmpObj);
-                if (tmpObj.doUpdate) {
-                    this.updateObjects.push(tmpObj);
-                }
+                if (tmpObj.doUpdate) this.updateObjects.push(tmpObj);
             }
-        };
 
-        // DISABLE BY SID:
+            return tmpObj;
+        };
+	// disabled by sid
         this.disableBySid = function(sid) {
             for (var i = 0; i < gameObjects.length; ++i) {
                 if (gameObjects[i].sid == sid) {
@@ -201,38 +195,31 @@ export class ObjectManager {
                 }
             }
         };
-
-        // REMOVE ALL FROM PLAYER:
+	// remove all items from player
         this.removeAllItems = function(sid, server) {
             for (var i = 0; i < gameObjects.length; ++i) {
                 if (gameObjects[i].active && gameObjects[i].owner && gameObjects[i].owner.sid == sid) {
                     this.disableObj(gameObjects[i]);
                 }
             }
-            if (server) {
-                server.broadcast("R", sid);
-            }
+            if (server) server.broadcast("R", sid);
         };
-
-        // FETCH SPAWN OBJECT:
+	// fetches spawn objects
         this.fetchSpawnObj = function(sid) {
             var tmpLoc = null;
             for (var i = 0; i < gameObjects.length; ++i) {
-                tmpObj = gameObjects[i];
-                if (tmpObj.active && tmpObj.owner && tmpObj.owner.sid == sid && tmpObj.spawnPoint) {
-                    tmpLoc = [tmpObj.x, tmpObj.y];
-                    this.disableObj(tmpObj);
-                    server.broadcast("Q", tmpObj.sid);
-                    if (tmpObj.owner) {
-                        tmpObj.owner.changeItemCount(tmpObj.group.id, -1);
-                    }
+                var obj = gameObjects[i];
+                if (obj.active && obj.owner && obj.owner.sid == sid && obj.spawnPoint) {
+                    tmpLoc = [obj.x, obj.y];
+                    this.disableObj(obj);
+                    if (server) server.broadcast("Q", obj.sid);
+                    if (obj.owner) obj.owner.changeItemCount(obj.group.id, -1);
                     break;
                 }
             }
             return tmpLoc;
         };
-
-        // CHECK IF PLACABLE:
+	// check if item placeable
         this.checkItemLocation = function(x, y, s, sM, indx, ignoreWater, placer) {
             for (var i = 0; i < gameObjects.length; ++i) {
                 var blockS = gameObjects[i].blocker ? gameObjects[i].blocker : gameObjects[i].getScale(sM, gameObjects[i].isItem);
@@ -245,8 +232,7 @@ export class ObjectManager {
             }
             return true;
         };
-
-        // ADD PROJECTILE:
+	// adds projectiles
         this.addProjectile = function(x, y, dir, range, indx) {
             var tmpData = items.projectiles[indx];
             var tmpProj;
@@ -262,8 +248,7 @@ export class ObjectManager {
             }
             tmpProj.init(indx, x, y, dir, tmpData.speed, range, tmpData.scale);
         };
-
-        // CHECK PLAYER COLLISION:
+	// checks players collision
         this.checkCollision = function(player, other, delta) {
             delta = delta || 1;
             var dx = player.x - other.x;
@@ -325,9 +310,7 @@ export class ObjectManager {
                             }
                         }
                     }
-                    if (other.zIndex > player.zIndex) {
-                        player.zIndex = other.zIndex;
-                    }
+                    if (other.zIndex > player.zIndex) player.zIndex = other.zIndex;
                     return true;
                 }
             }
