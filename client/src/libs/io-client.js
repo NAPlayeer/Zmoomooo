@@ -17,6 +17,9 @@ function IoClient() {
     this._handleMessage = this._handleMessage.bind(this);
 }
 
+// reusable temp payload to avoid per-call allocations
+var _sendTemp = [];
+
 IoClient.prototype.connect = function (address, callback, events) {
     if (!address) {
         throw new Error("connect(address) requires a WebSocket address.");
@@ -51,10 +54,14 @@ IoClient.prototype.send = function (type) {
         return;
     }
 
-    var payload = Array.prototype.slice.call(arguments, 1);
+    // build payload into reusable array to avoid allocation
+    _sendTemp.length = 0;
+    for (var i = 1; i < arguments.length; i++) {
+        _sendTemp.push(arguments[i]);
+    }
 
     try {
-        var binary = msgpack.encode([type, payload]);
+        var binary = msgpack.encode([type, _sendTemp]);
         this.socket.send(binary);
     } catch (error) {
         console.error("Failed to send packet:", error);
