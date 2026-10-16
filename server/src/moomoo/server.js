@@ -24,17 +24,28 @@ export class Game {
 
     server = {
         broadcast: (type, ...data) => {
-            const payload = encode([type, data]);
-            for (const player of this.players) {
-                if (!player.socket) continue;
-                player.socket.send(payload);
+            try {
+                const payload = encode([type, data]);
+                for (let i = 0; i < this.players.length; i++) {
+                    const p = this.players[i];
+                    if (!p || !p.socket) continue;
+                    try { p.socket.send(payload); } catch (e) { /* ignore socket send errors */ }
+                }
+            } catch (e) {
+                // encoding failed; skip broadcast
             }
         },
         send: (playerId, type, ...data) => {
             if (!playerId) return;
-            const target = this.players.find(p => p.id === playerId);
-            if (!target || !target.socket) return;
-            target.socket.send(encode([type, data]));
+            for (let i = 0; i < this.players.length; i++) {
+                const t = this.players[i];
+                if (!t) continue;
+                if (t.id === playerId) {
+                    if (!t.socket) return;
+                    try { t.socket.send(encode([type, data])); } catch (e) { /* ignore */ }
+                    return;
+                }
+            }
         }
     };
 
@@ -60,17 +71,21 @@ export class Game {
         const nano = (1000 / config.serverUpdateRate);
         const timer = new NanoTimer();
 
-        let last = performance.now();
+        let last = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
         let minimap_cd = config.minimapRate;
 
-        // reuse arrays to reduce allocations
+        // reuse arrays to reduce allocations (new temporary arrays only added)
         const minimap_ext = [];
-        const sentPlayersFlat = [];
-        const sentObjectsFlat = [];
+        const tmpFlatPlayers = [];
+        const tmpFlatObjects = [];
+        const tmpAiPayload = [];
+        const tmpCoords = [];
+        const activeAisTmp = [];
+        const leaderboardTmp = [];
 
         setInterval(() => {
 
-            const t = performance.now();
+            const t = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now();
             const delta = t - last;
             last = t;
 
@@ -85,6 +100,7 @@ export class Game {
             minimap_ext.length = 0;
             for (let i = 0; i < this.players.length; i++) {
                 const p = this.players[i];
+                if (!p) continue;
                 p.update(delta);
                 p.iconIndex = 0;
                 if (!p.alive) continue;
@@ -98,23 +114,25 @@ export class Game {
 
             // projectiles
             for (let i = 0; i < this.projectiles.length; i++) {
-                this.projectiles[i].update(delta);
+                const proj = this.projectiles[i];
+                if (proj && proj.active && typeof proj.update === "function") proj.update(delta);
             }
 
             this.updateAnimals(delta);
             this.updateTurrets(delta);
 
             // leaderboard (keep small)
+            leaderboardTmp.length = 0;
             {
                 const metric = p => p.points;
                 const maxEntries = Math.min(config.leaderboardMaxPlayers || 10, this.players.length);
                 const top = [];
                 for (let i = 0; i < this.players.length; i++) {
                     const p = this.players[i];
-                    if (!p.alive) continue;
+                    if (!p || !p.alive) continue;
                     const score = metric(p);
                     let j = 0;
-                    while (j < top.length && metric(top[j]) >= score) j++;
+                    while (j < top.length && top[j].points >= score) j++;
                     if (j < maxEntries) {
                         top.splice(j, 0, p);
                         if (top.length > maxEntries) top.pop();
@@ -122,53 +140,54 @@ export class Game {
                         top.push(p);
                     }
                 }
-                const payload = [];
                 for (let i = 0; i < top.length; i++) {
                     const p = top[i];
-                    payload.push(p.sid, p.name, metric(p));
+                    leaderboardTmp.push(p.sid, p.name, p.points);
                 }
-                this.server.broadcast("G", payload);
             }
+            this.server.broadcast("G", leaderboardTmp);
 
             // cache active AIs
-            const activeAis = [];
+            activeAisTmp.length = 0;
             for (let i = 0; i < this.ais.length; i++) {
                 const ai = this.ais[i];
-                if (ai.active) activeAis.push(ai);
+                if (ai && ai.active) activeAisTmp.push(ai);
             }
 
             // Main per-player send loop: build flat payloads and reuse arrays
             for (let pi = 0; pi < this.players.length; pi++) {
                 const player = this.players[pi];
-                if (!player || !player.active) continue;
+                if (!player || !player.active || !player.socket) continue;
 
                 // reset flat buffers
-                sentPlayersFlat.length = 0;
-                sentObjectsFlat.length = 0;
+                tmpFlatPlayers.length = 0;
+                tmpFlatObjects.length = 0;
 
                 // players visible to `player`
                 for (let i2 = 0; i2 < this.players.length; i2++) {
                     const p2 = this.players[i2];
-                    if (!p2.alive || !player.canSee(p2)) continue;
+                    if (!p2 || !p2.alive) continue;
+                    if (!player.canSee(p2)) continue;
 
                     if (!p2.sentTo[player.id]) {
                         p2.sentTo[player.id] = true;
-                        player.send("D", p2.getData(), player.id === p2.id);
+                        try { this.server.send(player.id, "D", p2.getData()); } catch (e) { /* ignore */ }
                     }
                     if (player.id === p2.id && p2.needsResourceSync) {
                         p2.needsResourceSync = false;
                         p2.syncResources();
                     }
                     const info = p2.getInfo();
-                    for (let j = 0; j < info.length; j++) sentPlayersFlat.push(info[j]);
+                    for (let k = 0; k < info.length; k++) tmpFlatPlayers.push(info[k]);
                 }
 
-                // objects visible to `player` (push flattened object payload)
+                // objects visible to `player`
                 for (let oi = 0; oi < this.game_objects.length; oi++) {
                     const obj = this.game_objects[oi];
-                    if (!obj || obj.sentTo[player.id] || !obj.active) continue;
+                    if (!obj || !obj.active) continue;
+                    if (obj.sentTo && obj.sentTo[player.id]) continue;
                     if (!obj.visibleToPlayer(player) || !player.canSee(obj)) continue;
-                    sentObjectsFlat.push(
+                    tmpFlatObjects.push(
                         obj.sid,
                         UTILS.fixTo(obj.x, 1),
                         UTILS.fixTo(obj.y, 1),
@@ -178,19 +197,21 @@ export class Game {
                         obj.id,
                         obj.owner ? obj.owner.sid : -1
                     );
+                    if (!obj.sentTo) obj.sentTo = {};
                     obj.sentTo[player.id] = true;
                 }
 
                 // send players / objects
-                player.send("a", sentPlayersFlat.length > 0 ? sentPlayersFlat : null);
+                try { player.send("a", tmpFlatPlayers.length > 0 ? tmpFlatPlayers : null); } catch (e) {}
+                try { player.send("H", tmpFlatObjects.length > 0 ? tmpFlatObjects : null); } catch (e) {}
 
                 // build & send ai payload
-                const aiPayload = [];
-                for (let aiI = 0; aiI < activeAis.length; aiI++) {
-                    const ai = activeAis[aiI];
-                    if (!ai.alive) continue;
+                tmpAiPayload.length = 0;
+                for (let aiI = 0; aiI < activeAisTmp.length; aiI++) {
+                    const ai = activeAisTmp[aiI];
+                    if (!ai || !ai.alive) continue;
                     if (!player.canSee(ai)) continue;
-                    aiPayload.push(
+                    tmpAiPayload.push(
                         ai.sid,
                         ai.index,
                         UTILS.fixTo(ai.x, 1),
@@ -200,130 +221,46 @@ export class Game {
                         ai.nameIndex ?? 0
                     );
                 }
-                player.send("I", aiPayload.length > 0 ? aiPayload : null);
-
-                player.send("H", sentObjectsFlat.length > 0 ? sentObjectsFlat : null);
+                try { player.send("I", tmpAiPayload.length > 0 ? tmpAiPayload : null); } catch (e) {}
 
                 // minimap coords
-                if (minimap_ext.length === 0) continue;
-                const coords = [];
-                for (let mi = 0; mi < minimap_ext.length; mi++) {
-                    const target = minimap_ext[mi];
-                    if (target.sid === player.sid) continue;
-                    if (!config.isSandbox && player.team && target.team !== player.team) continue;
-                    coords.push(target.x, target.y);
+                if (minimap_ext.length) {
+                    tmpCoords.length = 0;
+                    for (let mi = 0; mi < minimap_ext.length; mi++) {
+                        const t = minimap_ext[mi];
+                        if (t.sid === player.sid) continue;
+                        if (!config.isSandbox && player.team && t.team !== player.team) continue;
+                        tmpCoords.push(t.x, t.y);
+                    }
+                    if (tmpCoords.length) {
+                        try { player.send("7", tmpCoords); } catch (e) {}
+                    }
                 }
-                if (coords.length > 0) player.send("7", coords);
             }
 
         }, nano);
-
-        const init_objects = () => {
-
-            const spawnCounts = config.spawnCounts || {
-                treesPerArea: config.treesPerArea,
-                bushesPerArea: config.bushesPerArea,
-                totalRocks: config.totalRocks,
-                goldOres: config.goldOres
-            };
-
-            let treesPerArea = spawnCounts.treesPerArea;
-            let bushesPerArea = spawnCounts.bushesPerArea;
-            let totalRocks = spawnCounts.totalRocks;
-            let goldOres = spawnCounts.goldOres;
-            let treeScales = config.treeScales;
-            let bushScales = config.bushScales;
-            let rockScales = config.rockScales;
-            let cLoc = function () { return Math.round(Math.random() * config.mapScale); };
-            let rScale = function (scales) { return scales[Math.floor(Math.random() * scales.length)]; };
-
-            for (let i = 0; i < treesPerArea * config.areaCount;) {
-                let newObject = [this.game_objects.length, cLoc(), cLoc(), 0, rScale(treeScales), 0, undefined, false, null];
-                if (newObject[2] >= config.mapScale / 2 - config.riverWidth / 2 && newObject[2] <= config.mapScale / 2 + config.riverWidth / 2) continue;
-                if (newObject[2] >= config.mapScale - config.snowBiomeTop) continue;
-                if (this.object_manager.checkItemLocation(newObject[1], newObject[2], newObject[4], 0.6, null, false, null, true)) {
-                    this.object_manager.add(...newObject);
-                } else {
-                    continue;
-                }
-                i++;
-            };
-            for (let i = 0; i < bushesPerArea * config.areaCount;) {
-                let newObject = [this.game_objects.length, cLoc(), cLoc(), 0, rScale(bushScales), 1, undefined, false, null];
-                if (newObject[2] >= config.mapScale / 2 - config.riverWidth / 2 && newObject[2] <= config.mapScale / 2 + config.riverWidth / 2) continue;
-                if (this.object_manager.checkItemLocation(newObject[1], newObject[2], newObject[4], 0.6, null, false, null, true)) {
-                    this.object_manager.add(...newObject);
-                } else {
-                    continue;
-                }
-                i++;
-            };
-            for (let i = 0; i < totalRocks;) {
-                let newObject = [this.game_objects.length, cLoc(), cLoc(), 0, rScale(rockScales), 2, undefined, false, null];
-                if (this.object_manager.checkItemLocation(newObject[1], newObject[2], newObject[4], 0.6, null, true, null, true)) {
-                    this.object_manager.add(...newObject);
-                } else {
-                    continue;
-                }
-                i++;
-            };
-            for (let i = 0; i < goldOres;) {
-                let newObject = [this.game_objects.length, cLoc(), cLoc(), 0, rScale(rockScales), 3, undefined, false, null];
-                if (this.object_manager.checkItemLocation(newObject[1], newObject[2], newObject[4], 0.6, null, true, null, true)) {
-                    this.object_manager.add(...newObject);
-                } else {
-                    continue;
-                }
-                i++;
-            };
-        };
-
-        init_objects();
-        this.ensureAnimals();
-
     }
 
     buildAiSpawnPlan() {
         const map = config.mapScale;
         const fallbackPlan = [{
-            index: 0,
-            desired: 12
+            index: 0, desired: 12
         }, {
-            index: 1,
-            desired: 10
+            index: 1, desired: 10
         }, {
-            index: 4,
-            desired: 8
+            index: 4, desired: 8
         }, {
-            index: 5,
-            desired: 6
+            index: 5, desired: 6
         }, {
-            index: 2,
-            desired: 8
+            index: 2, desired: 8
         }, {
-            index: 3,
-            desired: 6
+            index: 3, desired: 6
         }, {
-            index: 6,
-            desired: 1,
-            positions: [{
-                xRatio: 0.42,
-                yRatio: 0.72
-            }]
+            index: 6, desired: 1, positions: [{ xRatio: 0.42, yRatio: 0.72 }]
         }, {
-            index: 7,
-            desired: 1,
-            positions: [{
-                xRatio: 0.18,
-                yRatio: 0.22
-            }]
+            index: 7, desired: 1, positions: [{ xRatio: 0.18, yRatio: 0.22 }]
         }, {
-            index: 8,
-            desired: 1,
-            positions: [{
-                xRatio: 0.78,
-                yRatio: 0.64
-            }]
+            index: 8, desired: 1, positions: [{ xRatio: 0.78, yRatio: 0.64 }]
         }];
 
         const planSource = Array.isArray(config.animalSpawnPlan) && config.animalSpawnPlan.length ? config.animalSpawnPlan : fallbackPlan;
@@ -342,7 +279,7 @@ export class Game {
                 }
                 return null;
             }).filter(Boolean);
-            return { index: plan.index, desired: desired, positions: resolvedPositions.length ? resolvedPositions : undefined, nextPosition: 0 };
+            return { index: plan.index, desired, positions: resolvedPositions.length ? resolvedPositions : undefined, nextPosition: 0 };
         }).filter(Boolean);
     }
 
@@ -351,9 +288,9 @@ export class Game {
         for (let pi = 0; pi < this.aiSpawnPlan.length; pi++) {
             const plan = this.aiSpawnPlan[pi];
             let activeOfType = 0;
-            for (let aiI = 0; aiI < this.ais.length; aiI++) {
-                const ai = this.ais[aiI];
-                if (ai.active && ai.index === plan.index) activeOfType++;
+            for (let i = 0; i < this.ais.length; i++) {
+                const a = this.ais[i];
+                if (a && a.active && a.index === plan.index) activeOfType++;
             }
             let safety = 0;
             while (activeOfType < plan.desired && safety < plan.desired * 3) {
@@ -385,9 +322,9 @@ export class Game {
         if (x < scale || y < scale || x > config.mapScale - scale || y > config.mapScale - scale) return false;
         if (!this.object_manager.checkItemLocation(x, y, scale, 0.6, null, false, null)) return false;
         for (let i = 0; i < this.ais.length; i++) {
-            const ai = this.ais[i];
-            if (!ai.active) continue;
-            if (UTILS.getDistance(x, y, ai.x, ai.y) < ai.scale + scale) return false;
+            const a = this.ais[i];
+            if (!a || !a.active) continue;
+            if (UTILS.getDistance(x, y, a.x, a.y) < a.scale + scale) return false;
         }
         return true;
     }
@@ -405,8 +342,8 @@ export class Game {
 
     updateAnimals(delta) {
         for (let i = 0; i < this.ais.length; i++) {
-            const ai = this.ais[i];
-            if (ai.active) ai.update(delta);
+            const a = this.ais[i];
+            if (a && a.active) a.update(delta);
         }
         this.aiSpawnCheckTimer -= delta;
         if (this.aiSpawnCheckTimer <= 0) {
@@ -422,12 +359,9 @@ export class Game {
         for (let i = 0; i < structures.length; i++) {
             const structure = structures[i];
             if (!structure || !structure.active) continue;
-
             if (typeof structure.update === "function") structure.update(delta);
-
             if (structure.projectile == null || !structure.shootRate || !structure.shootRange) continue;
             if (typeof structure.shootCount !== "number") structure.shootCount = structure.shootRate;
-
             structure.shootCount -= delta;
             if (structure.shootCount > 0) continue;
 
@@ -446,23 +380,11 @@ export class Game {
                 continue;
             }
             const projectileSpeed = projectileData.speed || 1.6;
-
             const muzzleOffset = structure.scale + 45;
             const spawnX = structure.x + Math.cos(direction) * muzzleOffset;
             const spawnY = structure.y + Math.sin(direction) * muzzleOffset;
 
-            this.projectile_manager.addProjectile(
-                spawnX,
-                spawnY,
-                direction,
-                structure.shootRange,
-                projectileSpeed,
-                structure.projectile,
-                structure.owner,
-                structure.sid,
-                projectileData.layer
-            );
-
+            this.projectile_manager.addProjectile(spawnX, spawnY, direction, structure.shootRange, projectileSpeed, structure.projectile, structure.owner, structure.sid, projectileData.layer);
             structure.shootCount = structure.shootRate;
             this.broadcastTurretShot(structure, direction);
         }
@@ -484,19 +406,19 @@ export class Game {
         };
 
         for (let i = 0; i < this.players.length; i++) {
-            const player = this.players[i];
-            if (!player.active || !player.alive) continue;
-            if (player === owner) continue;
-            if (player.skinIndex === 22) continue;
-            if (ownerTeam && player.team && player.team === ownerTeam) continue;
-            if (player.skin && player.skin.invisTimer && player.noMovTimer >= player.skin.invisTimer) continue;
-            consider(player);
+            const p = this.players[i];
+            if (!p || !p.active || !p.alive) continue;
+            if (p === owner) continue;
+            if (p.skinIndex === 22) continue;
+            if (ownerTeam && p.team && p.team === ownerTeam) continue;
+            if (p.skin && p.skin.invisTimer && p.noMovTimer >= p.skin.invisTimer) continue;
+            consider(p);
         }
 
         for (let i = 0; i < this.ais.length; i++) {
-            const ai = this.ais[i];
-            if (!ai.active || !ai.alive) continue;
-            consider(ai);
+            const a = this.ais[i];
+            if (!a || !a.active || !a.alive) continue;
+            consider(a);
         }
 
         return bestTarget;
@@ -505,18 +427,18 @@ export class Game {
     broadcastTurretShot(structure, direction) {
         const fixedDir = UTILS.fixTo(direction, 2);
         for (let i = 0; i < this.players.length; i++) {
-            const player = this.players[i];
-            if (!player.active) continue;
-            if (!structure.sentTo[player.id]) continue;
-            if (!player.canSee(structure)) continue;
-            player.send("M", structure.sid, fixedDir);
+            const p = this.players[i];
+            if (!p || !p.active) continue;
+            if (!structure.sentTo[p.id]) continue;
+            if (!p.canSee(structure)) continue;
+            try { p.send("M", structure.sid, fixedDir); } catch (e) {}
         }
     }
 
     addPlayer(socket) {
 
         const string_id = UTILS.randomString(16);
-        const sid = this.id_storage.findIndex(bool => bool);
+        const sid = this.id_storage.findIndex(b => b);
         const player = new Player(
             string_id,
             sid,
