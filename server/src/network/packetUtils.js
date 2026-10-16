@@ -7,6 +7,8 @@ export const MAX_PAYLOAD_ITEMS = 16;
 
 const BUFFER_SHORTAGE_NAMES = new Set(["BUFFER_SHORTAGE", "BufferShortage"]);
 
+// micro-optimizations: avoid unnecessary copies when possible and localize lookups
+
 export class InvalidPacketError extends Error {
     constructor(message) {
         super(message);
@@ -19,7 +21,9 @@ function isSupportedBinaryFrame(raw) {
 }
 
 function toUint8Array(raw) {
+    // Return a Uint8Array view over the existing buffer where possible to avoid extra copies.
     if (raw instanceof Uint8Array) {
+        // create a view referencing the same underlying buffer (preserve byteOffset/byteLength)
         return new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
     }
     if (ArrayBuffer.isView(raw)) {
@@ -54,12 +58,8 @@ function decodeBinary(view) {
 
 function isBufferShortageError(error) {
     if (!error) return false;
-    if (error.name && BUFFER_SHORTAGE_NAMES.has(error.name)) {
-        return true;
-    }
-    if (typeof error.message === "string" && BUFFER_SHORTAGE_NAMES.has(error.message)) {
-        return true;
-    }
+    if (error.name && BUFFER_SHORTAGE_NAMES.has(error.name)) return true;
+    if (typeof error.message === "string" && BUFFER_SHORTAGE_NAMES.has(error.message)) return true;
     return false;
 }
 
