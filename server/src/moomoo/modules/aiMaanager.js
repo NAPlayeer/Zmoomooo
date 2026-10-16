@@ -1,7 +1,6 @@
-// AI MANAGER:
 export class AiManager {
     constructor(ais, AI, players, items, objectManager, config, UTILS, scoreCallback, server) {
-        // AI TYPES:
+        // ai types / animals
         this.aiTypes = [{
             id: 0,
             src: "cow_1",
@@ -144,20 +143,28 @@ export class AiManager {
             chargePlayer: true,
             drop: ["food", 1000]
         }];
-
-        // SPAWN AI:
+        // Spawns ai
         this.spawn = function(x, y, dir, index) {
-            var tmpObj;
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(dir)) {
+                return null;
+            }
+            if (!Number.isInteger(index) || index < 0 || index >= this.aiTypes.length) {
+                return null;
+            }
+
+            var tmpObj = null;
             for (var i = 0; i < ais.length; ++i) {
                 if (!ais[i].active) {
                     tmpObj = ais[i];
                     break;
                 }
             }
+
             if (!tmpObj) {
                 tmpObj = new AI(ais.length, objectManager, players, items, UTILS, config, scoreCallback, server);
                 ais.push(tmpObj);
             }
+
             tmpObj.init(x, y, dir, index, this.aiTypes[index]);
             return tmpObj;
         };
